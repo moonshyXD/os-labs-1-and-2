@@ -1,0 +1,12 @@
+/src/parent
+/src/child
+/src/result.txt
+/src/reports/
+/report/*.aux
+/report/*.log
+/report/*.out
+/report/*.toc
+/report/*.lol
+/report/*.fls
+/report/*.fdb_latexmk
+/report/*.synctex.gz/docs/source-notes/REPORT.md

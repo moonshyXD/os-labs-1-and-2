@@ -1,0 +1,3 @@
+total 0
+-rwxrwxrwx 1 moonshy moonshy   45 Sep 16 15:24 alpha.txt
+drwxrwxrwx 1 moonshy moonshy 4096 Oct  3 14:47 nested

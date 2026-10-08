@@ -1,0 +1,265 @@
+\documentclass[12pt,a4paper]{article}
+\input{preamble}
+
+\newcommand{\ReportLab}{1 и 2}
+\newcommand{\ReportStudent}{В. Е. Авраменко}
+\newcommand{\ReportGroup}{М8О-204БВ-25}
+\newcommand{\ReportTeacher}{Н. А. Гапонов}
+\newcommand{\ReportDate}{08.10.2026}
+\newcommand{\ReportYear}{2026}
+\newcommand{\ReportCourse}{Операционные системы и архитектура компьютера}
+
+\begin{document}
+\input{titlepage}
+
+\section{Цель и условия работ}
+
+Цель сквозной лабораторной работы №1 -- получить профиль системных вызовов работающей программы, сгруппировать вызовы по назначению и сопоставить их с наблюдаемым поведением. В качестве объекта исследования выбрана GNU \texttt{ls}. В лабораторной работе №2 реализована передача текстовых команд от родительского процесса дочерней программе через неименованный канал и запись вычисленных сумм в файл.
+
+Выполнена группа 1, вариант 1 лабораторной работы №2. Трассировки получены 8 октября 2026 года в Linux x86\_64 под WSL2: ядро 6.6.87.2-microsoft-standard-WSL2, GCC 13.3.0, strace 6.8, GNU coreutils 9.4.
+
+Этот документ является промежуточным отчётом по ЛР №1 и №2. Согласно заданию ЛР №1, итоговую сводную аналитику системных вызовов следует дополнить после выполнения остальных лабораторных работ курса.
+
+\section{Лабораторная работа №1: профиль программы ls}
+
+\subsection{Сценарий и результат}
+
+Для наблюдения за системными вызовами выполнена команда из корня проекта:
+
+\begin{terminal}
+LC_ALL=C strace -o report/inc/ls-trace.txt ls -l report/inc/fixture > report/inc/ls-output.txt
+\end{terminal}
+
+Каталог содержит файл \texttt{alpha.txt} и вложенный каталог \texttt{nested}. Ключ \texttt{-l} запрашивает подробный список с метаданными. Обычные данные из файлов команда не читает. Программа завершилась с кодом 0; её вывод сохранён в \texttt{report/inc/ls-output.txt}, полная трасса -- в \texttt{report/inc/ls-trace.txt}.
+
+В сохранённой трассе насчитано 123 системных вызова. Это число обращений в данном запуске, а не время выполнения. Вызовы сгруппированы по их наблюдаемому назначению.
+
+\begin{table}[H]
+\caption{Группы системных вызовов GNU ls}
+\small
+\begin{tabularx}{\linewidth}{|P{3.1cm}|P{6.3cm}|L|}
+\hline
+\thead{Группа} & \thead{Вызовы и число} & \thead{Назначение}\tabularnewline \hline
+Запуск и завершение & \texttt{execve} (1), \texttt{exit\_group} (1) & Запуск программы и завершение с кодом 0. \\ \hline
+Файлы и библиотеки & \texttt{openat} (11), \texttt{read} (14), \texttt{pread64} (2), \texttt{close} (17), \texttt{lseek} (3), \texttt{access} (2) & Загрузка библиотек и чтение конфигурации, баз пользователей, групп и часового пояса. \\ \hline
+Каталог и метаданные & \texttt{getdents64} (2), \texttt{statx} (3), \texttt{fstat} (14), \texttt{newfstatat} (3), \texttt{statfs} (2), \texttt{lgetxattr} (3), \texttt{listxattr} (3) & Перечисление каталога, получение свойств файлов и проверка атрибутов файловой системы. \\ \hline
+Память & \texttt{brk} (3), \texttt{mmap} (17), \texttt{mprotect} (5), \texttt{munmap} (1) & Выделение памяти процесса, отображение библиотек и изменение защиты страниц. \\ \hline
+Вывод & \texttt{write} (1), \texttt{ioctl} (1) & Запись списка в stdout и проверка, является ли stdout терминалом. \\ \hline
+Служба имён & \texttt{socket} (4), \texttt{connect} (4) & Попытки обратиться к локальному сокету nscd; затем читаются системные базы имён. \\ \hline
+Среда выполнения & \texttt{arch\_prctl}, \texttt{set\_tid\_address}, \texttt{set\_robust\_list}, \texttt{rseq}, \texttt{prlimit64}, \texttt{getrandom} (по 1) & Инициализация состояния потока и служебных данных среды выполнения. \\ \hline
+\end{tabularx}
+\end{table}
+
+В трассе \texttt{openat} открывает исследуемый каталог, а \texttt{getdents64} возвращает записи каталога; следующий вызов \texttt{getdents64} возвращает 0, показывая конец списка. Вызовы \texttt{statx} получают метаданные элементов для подробного формата. Для вывода имён владельцев и групп \texttt{ls} обращается к NSS и читает системные базы. Итоговая строка записывается через \texttt{write} в файловый дескриптор 1.
+
+Ожидаемые нефатальные ошибки: \texttt{ENOENT} при проверке необязательного файла и сокета nscd. Запрос отсутствующей метки SELinux дал \texttt{ENODATA}, а проверка перенаправленного stdout -- \texttt{ENOTTY}. Программа всё равно вывела список и завершилась успешно.
+
+\section{Лабораторная работа №2: вариант 1, группа 1}
+
+\subsection{Задание и метод решения}
+
+Программа состоит из двух процессов. Родитель читает имя выходного файла, создаёт канал и порождает дочерний процесс. Дочерний процесс перенаправляет свой стандартный ввод на конец чтения канала и запускает отдельную программу \texttt{child}. Родитель передаёт строки команд через конец записи. Дочерняя программа разбирает числа в строке, вычисляет сумму и записывает её в файл. Пустая строка или конец ввода завершают передачу.
+
+Для этого варианта достаточно одностороннего канала: команды идут от родителя к ребёнку, а обратный канал не используется. После \texttt{fork} процессы закрывают неиспользуемые концы канала. Родитель закрывает канал записи после ввода и вызывает \texttt{waitpid}; закрытие всех дескрипторов записи позволяет ребёнку получить конец файла при чтении.
+
+Числа проверяются на диапазон \texttt{int}; сумма накапливается в \texttt{long} с проверкой переполнения. Некорректная строка диагностируется, не записывается, а обработка следующих строк продолжается. Ошибка приводит к ненулевому статусу дочерней программы. Пустые строки и строки без чисел не создают запись результата.
+
+\subsection{Файлы проекта и основные функции}
+
+\begin{table}[H]
+\caption{Структура исходного кода}
+\begin{tabularx}{\linewidth}{|P{3.2cm}|L|}
+\hline
+\thead{Файл} & \thead{Назначение}\tabularnewline \hline
+\texttt{parent.c} & Настройка \texttt{SIGPIPE}, создание канала и ребёнка, отправка строк, ожидание завершения. \\ \hline
+\texttt{parent\_input.c}\newline\texttt{parent\_input.h} & Динамическое чтение имени файла и командных строк родителем. \\ \hline
+\texttt{child.c} & Открытие выходного файла, чтение строк из stdin, запись сумм и обработка ошибок. \\ \hline
+\texttt{sum.c/.h} & Разбор строки, проверка токенов и диапазонов, расчёт суммы. \\ \hline
+\texttt{pipe\_io.c/.h} & Полная запись буфера и динамическое чтение строки из файлового дескриптора. \\ \hline
+\texttt{status.h} & Общий перечислимый тип статусов обработки. \\ \hline
+\texttt{Makefile} & Сборка исполняемых файлов \texttt{parent} и \texttt{child}. \\ \hline
+\end{tabularx}
+\end{table}
+
+Функция \texttt{run\_pipeline} подготавливает сигнал, вызывает \texttt{pipe} и \texttt{fork}. В дочерней ветке \texttt{start\_child} выполняет \texttt{dup2} и \texttt{execv}. В родительской ветке \texttt{run\_parent} закрывает лишний дескриптор, вызывает \texttt{send\_commands}, закрывает канал и дожидается ребёнка. В программе ребёнка \texttt{process\_lines} читает команды и вызывает \texttt{sum\_line}; \texttt{write\_sum} передаёт отформатированный результат через \texttt{write\_all}.
+
+Основные типы данных: \texttt{pid\_t} хранит идентификатор дочернего процесса, массив \texttt{int pipe1[2]} — дескрипторы чтения и записи канала, а \texttt{char *} вместе с \texttt{size\_t} используется для строк произвольной длины. Тип \texttt{ssize\_t} позволяет вернуть число прочитанных байтов либо \texttt{-1} при ошибке; перечисление \texttt{Status} различает успешную обработку, конец ввода и ошибки разбора или ввода-вывода.
+
+\begin{table}[H]
+\caption{Основные функции и их интерфейсы}
+\small
+\begin{tabularx}{\linewidth}{|P{5.2cm}|L|}
+\hline
+\thead{Функция} & \thead{Параметры, результат и назначение}\tabularnewline \hline
+\texttt{read\_filename(char **out)} & Возвращает \texttt{Status}; выделяет строку с именем файла для дочерней программы. \\ \hline
+\texttt{read\_command\_line(char **out, size\_t *out\_len)} & Возвращает \texttt{Status}; читает команду родителя и сообщает её длину. \\ \hline
+\texttt{write\_all(int fd, const char *buf, size\_t len)} & Возвращает 0 или \texttt{-1}; записывает весь буфер, повторяя запись после \texttt{EINTR}. \\ \hline
+\texttt{read\_line(int fd, char **line, size\_t *cap)} & Возвращает число прочитанных байтов или \texttt{-1}; динамически читает строку из дескриптора. \\ \hline
+\texttt{sum\_line(const char *line, Status *status)} & Возвращает сумму типа \texttt{long}, а через \texttt{status} сообщает об ошибке токена или переполнении. \\ \hline
+\texttt{process\_lines(int fd)} & Читает команды дочернего процесса, вызывает \texttt{sum\_line} и записывает успешные суммы; возвращает код завершения. \\ \hline
+\end{tabularx}
+\end{table}
+
+\subsection{Системные вызовы}
+
+\begin{table}[H]
+\caption{Системные вызовы, наблюдавшиеся при запуске ЛР №2}
+\small
+\begin{tabularx}{\linewidth}{|P{3.8cm}|L|}
+\hline
+\thead{Вызов ядра (число)} & \thead{Назначение в этом запуске}\tabularnewline \hline
+\texttt{rt\_sigaction} (1) & Настроить игнорирование \texttt{SIGPIPE}, чтобы родитель мог обработать \texttt{EPIPE}. \\ \hline
+\texttt{pipe2} (1) & Создать pipe; это реализация библиотечного вызова \texttt{pipe} в данной среде. \\ \hline
+\texttt{clone} (1) & Создать дочерний процесс; в этой среде вызван библиотечной функцией \texttt{fork}. \\ \hline
+\texttt{dup2} (1) & Подключить конец чтения канала к стандартному вводу ребёнка. \\ \hline
+\texttt{execve} (2) & Запустить \texttt{parent} под трассировщиком и заменить образ ребёнка программой \texttt{child}; вызов ребёнка сделан через \texttt{execv}. \\ \hline
+\texttt{openat} (5) & Открыть выходной файл ребёнком и файлы динамического загрузчика. \\ \hline
+\texttt{read} (40) & Прочитать пользовательский ввод, команды из pipe и данные библиотек. \\ \hline
+\texttt{write} (7) & Передать команды по pipe, записать суммы и вывести сообщение о завершении. \\ \hline
+\texttt{close} (9) & Закрыть концы pipe, выходной файл и дескрипторы загрузчика. \\ \hline
+\texttt{wait4} (1) & Дождаться ребёнка; это реализация библиотечного вызова \texttt{waitpid}. \\ \hline
+\texttt{exit\_group} (2) & Завершить родительский и дочерний процессы. \\ \hline
+\end{tabularx}
+\end{table}
+
+\begin{table}[H]
+\caption{Вызовы динамического загрузчика и среды выполнения в той же трассе}
+\small
+\begin{tabularx}{\linewidth}{|P{4.1cm}|L|}
+\hline
+\thead{Вызов ядра (число)} & \thead{Наблюдаемое назначение}\tabularnewline \hline
+\texttt{access} (2), \texttt{openat} и \texttt{read} (учтены выше) & Проверка необязательного файла загрузчика и чтение файлов библиотек и конфигурации. \\ \hline
+\texttt{arch\_prctl} (2), \texttt{set\_tid\_address} (2) & Настройка thread-local storage и служебного адреса каждого процесса. \\ \hline
+\texttt{brk} (6), \texttt{mmap} (16), \texttt{munmap} (2) & Управление кучей и отображениями исполняемых файлов, библиотек и кэша загрузчика. \\ \hline
+\texttt{fstat} (6), \texttt{pread64} (4) & Получение метаданных и чтение заголовков ELF-файла библиотеки. \\ \hline
+\texttt{getrandom} (2) & Получение случайных данных, запрошенных средой выполнения. \\ \hline
+\texttt{mprotect} (6) & Установка прав доступа к сегментам памяти исполняемых файлов и библиотек. \\ \hline
+\texttt{prlimit64} (2) & Чтение ограничения размера стека при запуске процессов. \\ \hline
+\texttt{rseq} (2), \texttt{set\_robust\_list} (3) & Регистрация служебных структур потоков в среде выполнения. \\ \hline
+\end{tabularx}
+\end{table}
+
+В обеих таблицах приведены все 24 различных имени системных вызовов из сохранённой трассы; повторные вызовы отражены в счётчиках. Часть обращений к \texttt{openat}, \texttt{read}, \texttt{close} и другим функциям относится к динамическому загрузчику и libc, поэтому она отделена от действий прикладного кода. Имена \texttt{clone}, \texttt{pipe2}, \texttt{execve} и \texttt{wait4} зависят от реализации libc и ядра.
+
+\subsection{Ключевые фрагменты кода}
+
+Родитель создаёт канал и дочерний процесс; ошибки системных вызовов проверяются до продолжения работы.
+\begin{listingblock}{Создание канала и дочернего процесса (parent.c)}
+\inputcode[fontsize=\footnotesize,firstline=104,lastline=129]{../src/parent.c}
+\end{listingblock}
+
+Дочерняя ветка подключает чтение канала к стандартному вводу и запускает отдельную программу.
+\begin{listingblock}{Перенаправление stdin и запуск child (parent.c)}
+\inputcode[fontsize=\footnotesize,firstline=21,lastline=35]{../src/parent.c}
+\end{listingblock}
+
+\clearpage
+Родитель отправляет строки, закрывает канал, чтобы передать конец ввода, и дожидается кода завершения ребёнка.
+\begin{listingblock}{Передача команд и ожидание ребёнка (parent.c)}
+\inputcode[fontsize=\footnotesize,firstline=37,lastline=58]{../src/parent.c}
+\inputcode[fontsize=\footnotesize,firstline=90,lastline=102]{../src/parent.c}
+\end{listingblock}
+
+Дочерний процесс проверяет числа и записывает сумму только для корректной строки.
+\clearpage
+\begin{listingblock}{Проверка целых чисел и накопление суммы (sum.c)}
+\inputcode[fontsize=\footnotesize,firstline=8,lastline=46]{../src/sum.c}
+\end{listingblock}
+
+\section{Результаты проверки}
+
+В зафиксированном запуске входной файл содержал имя результата и три строки чисел:
+
+\begin{listingblock}{Входные данные опыта ЛР №2}
+\inputterminal{inc/lab2-input.txt}
+\end{listingblock}
+
+Выходной файл содержал суммы 6, 5 и -1. Родитель сообщил о завершении ребёнка с кодом 0. Для воспроизведения из каталога проекта используются команды:
+
+\begin{terminal}
+cd src
+make
+mkdir -p reports
+strace -f -o /tmp/lab2-trace.txt ./parent < ../report/inc/lab2-input.txt > /tmp/lab2-stdout.txt
+cat reports/lab2-result.txt
+\end{terminal}
+
+В зафиксированном запуске выходной файл назывался \texttt{reports/lab2-result.txt}; приведённая команда воспроизведения создаёт для него каталог. В короткой проверке без трассировки используется файл \texttt{result.txt}:
+
+\begin{terminal}
+cd src
+make
+printf 'result.txt\n1 2 3\n10 -5\n\n' | ./parent
+cat result.txt
+\end{terminal}
+
+Ожидаются строки \texttt{6} и \texttt{5}, а родитель завершится с кодом 0. Сборка выполняется с флагами \texttt{-std=c11 -Wall -Wextra -Wpedantic -D\_POSIX\_C\_SOURCE=200809L}.
+
+Дополнительно проверены граничные ситуации:
+\begin{table}[H]
+\caption{Проверка обработки ошибок и формата ввода}
+\small
+\begin{tabularx}{\linewidth}{|P{4.5cm}|L|}
+\hline
+\thead{Сценарий} & \thead{Фактический результат}\tabularnewline \hline
+Имя файла и пустая завершающая строка в формате CRLF & Файл создаётся без завершающего символа возврата каретки; сумма \texttt{1 2 3} записывается как \texttt{6}, код завершения 0. \\ \hline
+В команде есть число за пределами \texttt{int} & Печатается диагностика; эта строка пропускается, последующие корректные строки обрабатываются, итоговый код равен 1. \\ \hline
+Каталог выходного файла отсутствует & Дочерняя программа сообщает об ошибке \texttt{open}, оба процесса завершаются ненулевым кодом без зависания. \\ \hline
+\end{tabularx}
+\end{table}
+
+\section{Анализ трассы ЛР №2}
+
+Трасса содержит 125 вызовов, если считать каждый начатый вызов один раз и не считать строки \texttt{resumed} повторно. В ней наблюдаются создание одного канала и одного дочернего процесса, два запуска исполняемых образов, перенаправление stdin ребёнка, запись трёх команд и трёх сумм, закрытие канала и ожидание ребёнка.
+
+\begin{listingblock}{Создание канала и дочернего процесса}
+\begin{terminal}
+1419 rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, ...}, NULL, 8) = 0
+1419 pipe2([3, 4], 0) = 0
+1419 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, ...) = 1420
+1420 dup2(3, 0 <unfinished ...>
+1419 write(4, "1 2 3\n", 6 <unfinished ...>
+1420 execve("./child", ["./child", "reports/lab2-result.txt"], ...) <unfinished ...>
+\end{terminal}
+\end{listingblock}
+
+Запись подтверждает передачу команд по дескриптору 4. В дочернем процессе дескриптор 3 становится стандартным вводом. PID в трассе относится к конкретному запуску и при повторении изменится.
+
+\clearpage
+\begin{listingblock}{Запись результатов и ожидание}
+\begin{terminal}
+1420 write(3, "6\n", 2) = 2
+1420 write(3, "5\n", 2) = 2
+1420 write(3, "-1\n", 3) = 3
+1419 wait4(1420, <unfinished ...>
+\end{terminal}
+\end{listingblock}
+
+Библиотечные функции \texttt{write\_all} и \texttt{read\_line} не являются системными вызовами; их обращения к ядру видны как отдельные \texttt{write} и \texttt{read}. В сохранённом опыте зафиксировано 40 чтений и 7 записей. Побайтовое чтение упрощает обработку строк, но увеличивает число обращений к ядру. Порядок строк с пометками \texttt{unfinished} и \texttt{resumed} отражает чередование процессов во время трассировки.
+
+\section{Выводы}
+
+Для сквозной работы получен профиль системных вызовов GNU \texttt{ls} и реализована межпроцессная передача команд через неименованный канал. В трассах наблюдаются операции чтения каталога и метаданных, а также вызовы \texttt{pipe2}, \texttt{clone}, \texttt{dup2}, \texttt{execve}, файлового ввода-вывода и ожидания процесса. Результат ЛР №2 подтверждён выходным файлом и нулевым кодом завершения ребёнка. Сохранённые трассы относятся к реальным запускам; системные номера процессов и детали конкретной среды могут изменяться.
+
+\appendixsection{А}{Исходный код проекта}
+
+\begin{listingblock}{Файл parent.c}\inputcode{../src/parent.c}\end{listingblock}
+\begin{listingblock}{Файл parent\_input.c}\inputcode{../src/parent_input.c}\end{listingblock}
+\begin{listingblock}{Файл parent\_input.h}\inputcode{../src/parent_input.h}\end{listingblock}
+\begin{listingblock}{Файл child.c}\inputcode{../src/child.c}\end{listingblock}
+\begin{listingblock}{Файл sum.c}\inputcode{../src/sum.c}\end{listingblock}
+\begin{listingblock}{Файл sum.h}\inputcode{../src/sum.h}\end{listingblock}
+\begin{listingblock}{Файл pipe\_io.c}\inputcode{../src/pipe_io.c}\end{listingblock}
+\begin{listingblock}{Файл pipe\_io.h}\inputcode{../src/pipe_io.h}\end{listingblock}
+\begin{listingblock}{Файл status.h}\inputcode{../src/status.h}\end{listingblock}
+\begin{listingblock}{Файл Makefile}\inputcode{../src/Makefile}\end{listingblock}
+
+\appendixsection{Б}{Полная трасса лабораторной работы №2}
+
+\begin{listingblock}{Вывод strace -f для программы parent}\inputterminal{inc/lab2-trace.txt}\end{listingblock}
+
+\appendixsection{В}{Полная трасса GNU ls}
+
+\begin{listingblock}{Вывод strace для GNU ls}\inputterminal{inc/ls-trace.txt}\end{listingblock}
+
+\end{document}
